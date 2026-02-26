@@ -116,6 +116,7 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
     try:
         point = ee.Geometry.Point([lon, lat])
         analysis_buffer = point.buffer(buffer_km * 1000)
+        
         jrc = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select("occurrence").unmask(0).clip(analysis_buffer)
         wc = ee.ImageCollection("ESA/WorldCover/v100").first().select("Map").clip(analysis_buffer)
         water_mask = jrc.lt(10)
@@ -138,30 +139,26 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         raw_fire_mask = dnbr.gt(0.15).And(ndvi_post.lt(0.3)).And(dndvi.gt(0.1)).And(natural_land_mask)
         legacy_fire_mask = raw_fire_mask.updateMask(raw_fire_mask.connectedPixelCount(100, True).gte(50))
 
-        # --- SENSOR RADAR (SENTINEL-1) CON FALLBACK ANTI-COLAPSO ---
-        s1 = ee.ImageCollection('COPERNICUS/S1_GRD').select(['VV']).filterBounds(analysis_buffer).filter(ee.Filter.eq('instrumentMode', 'IW'))
+        # --- SENSOR RADAR (SENTINEL-1) RESTAURADO A v5.5.6 ---
+        # Volvemos a tu lógica original que renderizaba el mapa sin problemas
+        s1 = ee.ImageCollection('COPERNICUS/S1_GRD').select(['VV', 'angle']).filterBounds(analysis_buffer).filter(ee.Filter.eq('instrumentMode', 'IW'))
+        s1_dry = s1.filterDate(date_post[0], date_post[1]).mosaic().focal_median(50, 'circle', 'meters').clip(analysis_buffer)
+        s1_wet = s1.filterDate(date_storm[0], date_storm[1]).mosaic().focal_median(50, 'circle', 'meters').clip(analysis_buffer)
         
-        # Imagen de seguridad (ceros) si el satélite no pasó
-        fallback_sar = ee.Image(0).rename('VV').clip(analysis_buffer)
-        
-        s1_dry_col = s1.filterDate(date_post[0], date_post[1])
-        s1_dry = ee.Image(ee.Algorithms.If(s1_dry_col.size().gt(0), s1_dry_col.median().clip(analysis_buffer), fallback_sar))
-        
-        s1_wet_col = s1.filterDate(date_storm[0], date_storm[1])
-        s1_wet = ee.Image(ee.Algorithms.If(s1_wet_col.size().gt(0), s1_wet_col.median().clip(analysis_buffer), fallback_sar))
-        
-        sar_delta = s1_wet.subtract(s1_dry).rename('SAR_DELTA')
+        sar_delta = s1_wet.select('VV').subtract(s1_dry.select('VV')).rename('SAR_DELTA')
         slope = ee.Terrain.slope(ee.Image('USGS/SRTMGL1_003').clip(analysis_buffer)).rename('SLOPE')
         
+        # --- MODELO DE RIESGO WLC ---
         integrated_mask = legacy_fire_mask.Or(sar_delta.gt(2.5).And(is_urban.Or(is_agri)).And(legacy_fire_mask.focal_max(500)))
         risk_index = dnbr.unitScale(0.15, 0.7).multiply(0.42).add(sar_delta.unitScale(0.5, 2.5).multiply(0.33)).add(slope.unitScale(5, 35).multiply(0.25)).rename('RISK_SCORE')
         
         # --- EXPORT STACK BLINDADO PARA LA IA ---
+        # Esta transformación SÓLO se aplica a los datos que viajan al cerebro XGBoost
         export_stack = ee.Image.cat([
             dnbr.float().rename('dNBR'),
             sar_delta.float().rename('SAR_DELTA'),
             slope.float().rename('SLOPE')
-        ]).unmask(0).reproject(crs='EPSG:4326', scale=100) # El .reproject corta el error de serialización
+        ]).unmask(0)
         
         return {
             "risk_layer": risk_index.updateMask(integrated_mask).updateMask(risk_index.gte(min_display_threshold)),
@@ -315,6 +312,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
