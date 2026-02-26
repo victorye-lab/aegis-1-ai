@@ -17,7 +17,7 @@ st.set_page_config(
     page_icon="🛰️"
 )
 
-# --- CARGA DEL CEREBRO IA (NUEVO v6.4.0) ---
+# --- CARGA DEL CEREBRO IA ---
 MODEL_PATH = 'aegis_v6_brain.json'
 @st.cache_resource
 def load_aegis_brain():
@@ -31,6 +31,7 @@ def load_aegis_brain():
 
 aegis_brain = load_aegis_brain()
 
+# Inicialización de Estado de Sesión
 if 'mission_data' not in st.session_state:
     st.session_state.mission_data = None
 if 'last_calc_params' not in st.session_state:
@@ -71,7 +72,9 @@ def initialize_geospatial_engine():
 
 initialize_geospatial_engine()
 
-# --- THEME & LEGEND (TUS VERSIONES INTEGRADAS) ---
+# ---------------------------------------------------------
+# 2. UI THEME ENGINE
+# ---------------------------------------------------------
 def apply_professional_theme():
     bg, sidebar_bg, text, card_bg, border, accent = "#0e1117", "#262730", "#fafafa", "#1f2129", "#444", "#00FFFF"
     st.markdown(f"""
@@ -80,7 +83,7 @@ def apply_professional_theme():
         .stApp {{ background-color: {bg}; color: {text}; font-family: 'Inter', sans-serif; }}
         section[data-testid="stSidebar"] > div {{ background-color: {sidebar_bg}; border-right: 1px solid {border}; }}
         h1, h2, h3 {{ font-family: 'Inter', sans-serif; text-transform: uppercase; letter-spacing: 1px; color: {text} !important; }}
-        div[data-testid="stMetricValue"] {{ font-family: 'Roboto Mono', monospace; font-size: 1.5rem !important; }}
+        div[data-testid="stMetricValue"] {{ font-family: 'Roboto Mono', monospace; font-size: 1.5rem !important; color: {text} !important; }}
         div[data-testid="stMetric"] {{ background-color: {card_bg}; border: 1px solid {border}; padding: 10px; border-radius: 4px; }}
         .legend-container {{ background-color: {card_bg}; padding: 10px; border: 1px solid {border}; border-radius: 4px; margin-top: 10px; }}
         .live-indicator {{ animation: blink 2s infinite; color: {accent}; font-weight: bold; }}
@@ -93,7 +96,7 @@ def create_categorical_legend(text_color):
     return f"""
     <div class="legend-container">
         <div style="font-family: 'Roboto Mono', monospace; font-size: 0.7em; font-weight: bold; color: {text_color}; margin-bottom: 8px; border-bottom: 1px solid #555; padding-bottom: 4px; display: flex; justify-content: space-between;">
-            <span>RISK CLASSIFICATION (v6.4.0-AI)</span>
+            <span>RISK CLASSIFICATION (v6.4.2-AI)</span>
             <span class="live-indicator">● AI ACTIVE</span>
         </div>
         <div style="display: grid; grid-template-columns: 1fr; gap: 5px; font-family: 'Inter', sans-serif; font-size: 0.75em; color: {text_color};">
@@ -105,7 +108,9 @@ def create_categorical_legend(text_color):
     </div>
     """
 
-# --- GEOSPATIAL CORE (v5.5.6 INTEGRAL) ---
+# ---------------------------------------------------------
+# 3. GEOSPATIAL CORE (v5.5.6 INTEGRAL)
+# ---------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_display_threshold, buffer_km):
     try:
@@ -132,10 +137,6 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         raw_fire_mask = dnbr.gt(0.15).And(ndvi_post.lt(0.3)).And(dndvi.gt(0.1)).And(natural_land_mask)
         legacy_fire_mask = raw_fire_mask.updateMask(raw_fire_mask.connectedPixelCount(100, True).gte(50))
 
-        firms = ee.ImageCollection("FIRMS").select(['T21']).filterBounds(analysis_buffer).filterDate(date_pre[1], date_post[0])
-        thermal_raster = firms.count().gt(0).unmask(0).clip(analysis_buffer)
-        validation_layer = thermal_raster.focal_max(3000, 'circle', 'meters').updateMask(thermal_raster.focal_max(3000, 'circle', 'meters'))
-        
         s1 = ee.ImageCollection('COPERNICUS/S1_GRD').select(['VV']).filterBounds(analysis_buffer).filter(ee.Filter.eq('instrumentMode', 'IW'))
         s1_dry = s1.filterDate(date_post[0], date_post[1]).mosaic().clip(analysis_buffer)
         s1_wet = s1.filterDate(date_storm[0], date_storm[1]).mosaic().clip(analysis_buffer)
@@ -145,7 +146,6 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         integrated_mask = legacy_fire_mask.Or(sar_delta.gt(2.5).And(is_urban.Or(is_agri)).And(legacy_fire_mask.focal_max(500)))
         risk_index = dnbr.unitScale(0.15, 0.7).multiply(0.42).add(sar_delta.unitScale(0.5, 2.5).multiply(0.33)).add(slope.unitScale(5, 35).multiply(0.25)).rename('RISK_SCORE')
         
-        # --- EXPORT STACK v6.4.0 ---
         export_stack = ee.Image.cat([
             dnbr.unmask(0).rename('dNBR'),
             sar_delta.unmask(0).rename('SAR_DELTA'),
@@ -156,7 +156,6 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
             "risk_layer": risk_index.updateMask(integrated_mask).updateMask(risk_index.gte(min_display_threshold)),
             "dnbr_layer": dnbr.updateMask(legacy_fire_mask), 
             "sar_layer": sar_delta.gt(0.8).updateMask(integrated_mask),
-            "validation_layer": validation_layer,
             "raw_risk": risk_index.updateMask(integrated_mask),
             "export_stack": export_stack,
             "analysis_buffer": analysis_buffer,
@@ -187,79 +186,72 @@ def main():
         st.markdown("---")
         min_risk_threshold = st.slider("Risk Filter", 0.0, 0.8, 0.35)
         view_mode = st.selectbox("Map Type", ["Satellite (Realism)", "Dark (Technical)", "Light (Day Ops)"])
-        visible_layers = st.multiselect("Active Layers", ['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)', 'NASA Validation (Reference)'], default=['Burn Scar (Orange)'])
+        visible_layers = st.multiselect("Active Layers", ['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)'], default=['Burn Scar (Orange)'])
 
     st.title("AEGIS-1 // RISK INTELLIGENCE PLATFORM")
     st.markdown("##### POST-WILDFIRE GEOMORPHOLOGICAL SURVEILLANCE")
+    
     col_map, col_data = st.columns([3, 1])
     
     current_params = {'lat': lat, 'lon': lon, 'dates': str(d_pre)+str(d_post)+str(d_storm), 'buffer': buffer_km}
+    
     if st.session_state.mission_data is None or st.session_state.last_calc_params != current_params:
         with st.status("🛰️ UPDATING MISSION DATA..."):
             data = generate_risk_analysis(lat, lon, (d_pre, d_pre), (d_post, d_post), (d_storm, d_storm), min_risk_threshold, buffer_km)
-            st.session_state.mission_data = data; st.session_state.last_calc_params = current_params
+            st.session_state.mission_data = data
+            st.session_state.last_calc_params = current_params
 
     data = st.session_state.mission_data
+
     with col_map:
         if data.get("success"):
-            if "Satellite" in view_mode: m = folium.Map([lat, lon], zoom_start=12, tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri')
-            elif "Light" in view_mode: m = folium.Map([lat, lon], zoom_start=12, tiles="OpenStreetMap")
-            else: m = folium.Map([lat, lon], zoom_start=12, tiles="CartoDB dark_matter")
+            if "Satellite" in view_mode: 
+                m = folium.Map([lat, lon], zoom_start=12, tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri')
+            elif "Light" in view_mode: 
+                m = folium.Map([lat, lon], zoom_start=12, tiles="OpenStreetMap")
+            else: 
+                m = folium.Map([lat, lon], zoom_start=12, tiles="CartoDB dark_matter")
 
             def add_lyr(img, name, p):
-                try: folium.raster_layers.TileLayer(tiles=ee.Image(img).getMapId(p)['tile_fetcher'].url_format, attr='GEE', name=name, overlay=True).add_to(m)
+                try: 
+                    folium.raster_layers.TileLayer(tiles=ee.Image(img).getMapId(p)['tile_fetcher'].url_format, attr='GEE', name=name, overlay=True).add_to(m)
                 except: pass
 
             if 'Burn Scar (Orange)' in visible_layers: add_lyr(data['dnbr_layer'], 'Burn Scar', {'min':0.1, 'max':0.7, 'palette':['FF4500', '8B0000']})
             if 'Risk Model (WLC)' in visible_layers: add_lyr(data['risk_layer'], 'Risk Model', {'min': 0.35, 'max': 0.8, 'palette': ['FFFF00', 'FF0000', 'FF00FF']})
             if 'Soil Moisture (Radar)' in visible_layers: add_lyr(data['sar_layer'], 'Moisture', {'palette':['00FFFF']})
+            
             folium.LayerControl().add_to(m)
             st.components.v1.html(m._repr_html_(), height=850)
 
-   with col_data:
+    with col_data:
         if data.get("success"):
             st.markdown("### MISSION TELEMETRY")
-            
-            # --- TELEMETRÍA IA ROBUSTA (v6.4.1) ---
             if aegis_brain:
                 with st.spinner("🤖 AI INFERENCE..."):
                     try:
-                        # Forzamos que la imagen tenga bandas válidas antes del muestreo
                         stack_to_sample = data['export_stack'].unmask(0)
-                        
-                        samples = stack_to_sample.sample(
-                            region=data['analysis_buffer'], 
-                            scale=100, 
-                            numPixels=500
-                        ).getInfo()
-                        
+                        samples = stack_to_sample.sample(region=data['analysis_buffer'], scale=100, numPixels=500).getInfo()
                         if 'features' in samples and len(samples['features']) > 0:
-                            feat_list = []
-                            for f in samples['features']:
-                                p = f['properties']
-                                feat_list.append([
-                                    p.get('dNBR', 0), 
-                                    p.get('SAR_DELTA', 0), 
-                                    p.get('SLOPE', 0)
-                                ])
-                            
+                            feat_list = [[f['properties'].get('dNBR', 0), f['properties'].get('SAR_DELTA', 0), f['properties'].get('SLOPE', 0)] for f in samples['features']]
                             input_df = pd.DataFrame(feat_list, columns=['BURN_SEVERITY_dNBR', 'SOIL_MOISTURE_CHANGE', 'SLOPE_DEG'])
                             ai_prob = np.mean(aegis_brain.predict_proba(input_df)[:, 1])
                             st.metric("AI PREDICTION (XGBOOST)", f"{ai_prob*100:.1f}%", delta="Neural Scan")
-                        else:
-                            st.warning("⚠️ IA: Sin datos suficientes en esta zona.")
-                    
-                    except Exception as e:
-                        st.error("⚠️ IA: Error de telemetría.")
-                        st.caption(f"Detalle técnico: {str(e)}")
-            
-            # --- TELEMETRÍA ORIGINAL ---
+                    except: st.error("⚠️ IA: Error")
+
             try:
                 stats = data['raw_risk'].reduceRegion(ee.Reducer.mean(), data['geom'].buffer(1000), 250).getInfo()
                 val = stats.get('RISK_SCORE', 0) if stats else 0
                 st.metric("VIEWPORT RISK (v5.5)", f"{(val if val else 0)*100:.1f}%", delta="Static WLC")
-            except:
-                st.metric("VIEWPORT RISK (v5.5)", "N/A", delta="Sensor Error")
+            except: st.metric("VIEWPORT RISK (v5.5)", "N/A")
+
+            st.markdown(create_categorical_legend(text_color), unsafe_allow_html=True)
+            if st.button("GENERATE DATASET (CSV)"):
+                try:
+                    df = pd.DataFrame([[f['geometry']['coordinates'][1], f['geometry']['coordinates'][0], f['properties'].get('dNBR', 0)] for f in data['export_stack'].sample(region=data['analysis_buffer'], scale=100, numPixels=1000).getInfo()['features']], columns=['LAT','LON','dNBR'])
+                    st.download_button("DOWNLOAD CSV", df.to_csv(index=False), "aegis_extract.csv", "text/csv")
+                except: st.error("Export Error")
+
 if __name__ == "__main__":
     main()
 
