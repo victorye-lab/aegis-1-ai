@@ -216,26 +216,50 @@ def main():
             folium.LayerControl().add_to(m)
             st.components.v1.html(m._repr_html_(), height=850)
 
-    with col_data:
+   with col_data:
         if data.get("success"):
             st.markdown("### MISSION TELEMETRY")
-            # --- TELEMETRÍA IA (NUEVA v6.4.0) ---
+            
+            # --- TELEMETRÍA IA ROBUSTA (v6.4.1) ---
             if aegis_brain:
                 with st.spinner("🤖 AI INFERENCE..."):
-                    samples = data['export_stack'].sample(region=data['analysis_buffer'], scale=100, numPixels=500).getInfo()
-                    feat_list = [[f['properties'].get('dNBR', 0), f['properties'].get('SAR_DELTA', 0), f['properties'].get('SLOPE', 0)] for f in samples['features']]
-                    ai_prob = np.mean(aegis_brain.predict_proba(pd.DataFrame(feat_list, columns=['BURN_SEVERITY_dNBR', 'SOIL_MOISTURE_CHANGE', 'SLOPE_DEG']))[:, 1])
-                st.metric("AI PREDICTION (XGBOOST)", f"{ai_prob*100:.1f}%", delta="Neural Scan")
+                    try:
+                        # Forzamos que la imagen tenga bandas válidas antes del muestreo
+                        stack_to_sample = data['export_stack'].unmask(0)
+                        
+                        samples = stack_to_sample.sample(
+                            region=data['analysis_buffer'], 
+                            scale=100, 
+                            numPixels=500
+                        ).getInfo()
+                        
+                        if 'features' in samples and len(samples['features']) > 0:
+                            feat_list = []
+                            for f in samples['features']:
+                                p = f['properties']
+                                feat_list.append([
+                                    p.get('dNBR', 0), 
+                                    p.get('SAR_DELTA', 0), 
+                                    p.get('SLOPE', 0)
+                                ])
+                            
+                            input_df = pd.DataFrame(feat_list, columns=['BURN_SEVERITY_dNBR', 'SOIL_MOISTURE_CHANGE', 'SLOPE_DEG'])
+                            ai_prob = np.mean(aegis_brain.predict_proba(input_df)[:, 1])
+                            st.metric("AI PREDICTION (XGBOOST)", f"{ai_prob*100:.1f}%", delta="Neural Scan")
+                        else:
+                            st.warning("⚠️ IA: Sin datos suficientes en esta zona.")
+                    
+                    except Exception as e:
+                        st.error("⚠️ IA: Error de telemetría.")
+                        st.caption(f"Detalle técnico: {str(e)}")
             
             # --- TELEMETRÍA ORIGINAL ---
-            stats = data['raw_risk'].reduceRegion(ee.Reducer.mean(), data['geom'].buffer(1000), 250).getInfo()
-            val = stats.get('RISK_SCORE', 0)
-            st.metric("VIEWPORT RISK (v5.5)", f"{val*100:.1f}%", delta="Static WLC")
-            st.markdown(create_categorical_legend(text_color), unsafe_allow_html=True)
-            
-            if st.button("GENERATE DATASET (CSV)"):
-                df = pd.DataFrame([[f['geometry']['coordinates'][1], f['geometry']['coordinates'][0], f['properties'].get('dNBR', 0)] for f in data['export_stack'].sample(region=data['analysis_buffer'], scale=100, numPixels=1000).getInfo()['features']], columns=['LAT','LON','dNBR'])
-                st.download_button("DOWNLOAD CSV", df.to_csv(index=False), "aegis_extract.csv", "text/csv")
-
+            try:
+                stats = data['raw_risk'].reduceRegion(ee.Reducer.mean(), data['geom'].buffer(1000), 250).getInfo()
+                val = stats.get('RISK_SCORE', 0) if stats else 0
+                st.metric("VIEWPORT RISK (v5.5)", f"{(val if val else 0)*100:.1f}%", delta="Static WLC")
+            except:
+                st.metric("VIEWPORT RISK (v5.5)", "N/A", delta="Sensor Error")
 if __name__ == "__main__":
     main()
+
