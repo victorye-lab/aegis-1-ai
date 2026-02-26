@@ -96,7 +96,7 @@ def create_categorical_legend(text_color):
     return f"""
     <div class="legend-container">
         <div style="font-family: 'Roboto Mono', monospace; font-size: 0.7em; font-weight: bold; color: {text_color}; margin-bottom: 8px; border-bottom: 1px solid #555; padding-bottom: 4px; display: flex; justify-content: space-between;">
-            <span>RISK CLASSIFICATION (v6.4.2-AI)</span>
+            <span>RISK CLASSIFICATION (v6.5.2-AI)</span>
             <span class="live-indicator">● AI ACTIVE</span>
         </div>
         <div style="display: grid; grid-template-columns: 1fr; gap: 5px; font-family: 'Inter', sans-serif; font-size: 0.75em; color: {text_color};">
@@ -109,7 +109,7 @@ def create_categorical_legend(text_color):
     """
 
 # ---------------------------------------------------------
-# 3. GEOSPATIAL CORE (v5.5.6 INTEGRAL)
+# 3. GEOSPATIAL CORE
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_display_threshold, buffer_km):
@@ -139,8 +139,7 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         raw_fire_mask = dnbr.gt(0.15).And(ndvi_post.lt(0.3)).And(dndvi.gt(0.1)).And(natural_land_mask)
         legacy_fire_mask = raw_fire_mask.updateMask(raw_fire_mask.connectedPixelCount(100, True).gte(50))
 
-        # --- SENSOR RADAR (SENTINEL-1) RESTAURADO A v5.5.6 ---
-        # Volvemos a tu lógica original que renderizaba el mapa sin problemas
+        # --- SENSOR RADAR (SENTINEL-1) ---
         s1 = ee.ImageCollection('COPERNICUS/S1_GRD').select(['VV', 'angle']).filterBounds(analysis_buffer).filter(ee.Filter.eq('instrumentMode', 'IW'))
         s1_dry = s1.filterDate(date_post[0], date_post[1]).mosaic().focal_median(50, 'circle', 'meters').clip(analysis_buffer)
         s1_wet = s1.filterDate(date_storm[0], date_storm[1]).mosaic().focal_median(50, 'circle', 'meters').clip(analysis_buffer)
@@ -153,7 +152,6 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         risk_index = dnbr.unitScale(0.15, 0.7).multiply(0.42).add(sar_delta.unitScale(0.5, 2.5).multiply(0.33)).add(slope.unitScale(5, 35).multiply(0.25)).rename('RISK_SCORE')
         
         # --- EXPORT STACK BLINDADO PARA LA IA ---
-        # Esta transformación SÓLO se aplica a los datos que viajan al cerebro XGBoost
         export_stack = ee.Image.cat([
             dnbr.float().rename('dNBR'),
             sar_delta.float().rename('SAR_DELTA'),
@@ -172,7 +170,10 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
             "geom": point, "success": True
         }
     except Exception as e: return {"error": str(e), "success": False}
-# --- MAIN ---
+
+# ---------------------------------------------------------
+# 4. MAIN APPLICATION
+# ---------------------------------------------------------
 def main():
     text_color = apply_professional_theme()
     with st.sidebar:
@@ -193,21 +194,18 @@ def main():
         st.markdown("---")
         min_risk_threshold = st.slider("Risk Filter", 0.0, 0.8, 0.35)
         view_mode = st.selectbox("Map Type", ["Satellite (Realism)", "Dark (Technical)", "Light (Day Ops)"])
-        visible_layers = st.multiselect("Active Layers", ['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)'], default=['Burn Scar (Orange)'])
+        visible_layers = st.multiselect("Active Layers", ['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)'], default=['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)'])
 
     st.title("AEGIS-1 // RISK INTELLIGENCE PLATFORM")
     st.markdown("##### POST-WILDFIRE GEOMORPHOLOGICAL SURVEILLANCE")
     
     col_map, col_data = st.columns([3, 1])
     
-    # --- FORMATEO ESTRICTO DE FECHAS (v6.4.7) ---
+    # --- FORMATEO ESTRICTO DE FECHAS ---
     def format_date_for_gee(d):
-        if isinstance(d, tuple) and len(d) == 2:
-            return (str(d[0]), str(d[1]))
-        elif isinstance(d, tuple) and len(d) == 1:
-            return (str(d[0]), str(d[0]))
-        else:
-            return (str(d), str(d))
+        if isinstance(d, tuple) and len(d) == 2: return (str(d[0]), str(d[1]))
+        elif isinstance(d, tuple) and len(d) == 1: return (str(d[0]), str(d[0]))
+        else: return (str(d), str(d))
 
     dates_fmt = {
         'pre': format_date_for_gee(d_pre),
@@ -219,14 +217,8 @@ def main():
     
     if st.session_state.mission_data is None or st.session_state.last_calc_params != current_params:
         with st.status("🛰️ UPDATING MISSION DATA..."):
-            # Usamos dates_fmt en lugar de pasar d_pre crudo
             data = generate_risk_analysis(
-                lat, lon, 
-                dates_fmt['pre'], 
-                dates_fmt['post'], 
-                dates_fmt['storm'], 
-                min_risk_threshold, 
-                buffer_km
+                lat, lon, dates_fmt['pre'], dates_fmt['post'], dates_fmt['storm'], min_risk_threshold, buffer_km
             )
             st.session_state.mission_data = data
             st.session_state.last_calc_params = current_params
@@ -244,13 +236,8 @@ def main():
 
             def add_lyr(img, name, p):
                 try: 
-                    map_id = ee.Image(img).getMapId(p)
-                    folium.raster_layers.TileLayer(
-                        tiles=map_id['tile_fetcher'].url_format, 
-                        attr='GEE', name=name, overlay=True
-                    ).add_to(m)
-                except Exception as e: 
-                    st.sidebar.warning(f"⚠️ Capa '{name}' omitida: Datos insuficientes en las fechas indicadas.")
+                    folium.raster_layers.TileLayer(tiles=ee.Image(img).getMapId(p)['tile_fetcher'].url_format, attr='GEE', name=name, overlay=True).add_to(m)
+                except: pass
 
             if 'Burn Scar (Orange)' in visible_layers: add_lyr(data['dnbr_layer'], 'Burn Scar', {'min':0.1, 'max':0.7, 'palette':['FF4500', '8B0000']})
             if 'Risk Model (WLC)' in visible_layers: add_lyr(data['risk_layer'], 'Risk Model', {'min': 0.35, 'max': 0.8, 'palette': ['FFFF00', 'FF0000', 'FF00FF']})
@@ -265,19 +252,12 @@ def main():
             if aegis_brain:
                 with st.spinner("🤖 AI INFERENCE..."):
                     try:
-                        # Usamos .bounds() para enviar un rectángulo simple, no el círculo complejo
                         roi = data['analysis_buffer'].bounds()
-                        
-                        # Muestreo optimizado
                         samples = data['export_stack'].sample(
-                            region=roi, 
-                            scale=200, 
-                            numPixels=300,
-                            geometries=False # Esto reduce el peso del JSON masivamente
+                            region=roi, scale=200, numPixels=300, geometries=False
                         ).getInfo()
                         
                         if 'features' in samples and len(samples['features']) > 0:
-                            # Extracción de propiedades
                             feat_list = [[
                                 f['properties'].get('dNBR', 0), 
                                 f['properties'].get('SAR_DELTA', 0), 
@@ -285,16 +265,13 @@ def main():
                             ] for f in samples['features']]
                             
                             input_df = pd.DataFrame(feat_list, columns=['BURN_SEVERITY_dNBR', 'SOIL_MOISTURE_CHANGE', 'SLOPE_DEG'])
-                            
-                            # Ejecución del cerebro XGBoost
                             ai_prob = np.mean(aegis_brain.predict_proba(input_df)[:, 1])
                             
                             st.metric("AI PREDICTION (XGBOOST)", f"{ai_prob*100:.1f}%", delta="Neural Scan")
                         else:
                             st.warning("⚠️ IA: Zona sin datos válidos.")
                     except Exception as e:
-                        st.error("⚠️ IA: Error de Serialización")
-                        # Imprimimos el error simplificado para no ensuciar la UI
+                        st.error("⚠️ IA: Error en Telemetría")
                         st.caption(f"Log: {str(e)[:100]}")
 
             try:
