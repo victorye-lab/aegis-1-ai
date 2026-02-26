@@ -112,7 +112,12 @@ def create_categorical_legend(text_color):
 # 3. GEOSPATIAL CORE
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_display_threshold, buffer_km):
+def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, buffer_km):
+    """
+    Core analysis function. Returns raw computed layers WITHOUT applying
+    min_display_threshold mask — that filter is applied at render time
+    so the cached result remains reusable across slider changes.
+    """
     try:
         point = ee.Geometry.Point([lon, lat])
         analysis_buffer = point.buffer(buffer_km * 1000)
@@ -136,7 +141,9 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         ndvi_post = s2_post.normalizedDifference(['B8', 'B4']); ndvi_pre = s2_pre.normalizedDifference(['B8', 'B4'])
         dndvi = ndvi_pre.subtract(ndvi_post)
         
+        # raw_fire_mask: used for Burn Scar layer (no connectedPixelCount restriction)
         raw_fire_mask = dnbr.gt(0.15).And(ndvi_post.lt(0.3)).And(dndvi.gt(0.1)).And(natural_land_mask)
+        # legacy_fire_mask: stricter version (kept for reference / future use)
         legacy_fire_mask = raw_fire_mask.updateMask(raw_fire_mask.connectedPixelCount(100, True).gte(50))
 
         # --- SENSOR RADAR (SENTINEL-1) ---
@@ -148,37 +155,49 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         slope = ee.Terrain.slope(ee.Image('USGS/SRTMGL1_003').clip(analysis_buffer)).rename('SLOPE')
         
         # --- MODELO DE RIESGO WLC ---
-        integrated_mask = legacy_fire_mask.Or(sar_delta.gt(2.5).And(is_urban.Or(is_agri)).And(legacy_fire_mask.focal_max(500)))
-        risk_index = dnbr.unitScale(0.15, 0.7).multiply(0.42).add(sar_delta.unitScale(0.5, 2.5).multiply(0.33)).add(slope.unitScale(5, 35).multiply(0.25)).rename('RISK_SCORE')
-        
-        # --- EXPORT STACK BLINDADO PARA LA IA ---
+        # NOTE: risk_index is computed WITHOUT integrated_mask so it is always available.
+        # The display threshold is applied at render time in main().
+        risk_index = (
+            dnbr.unitScale(0.15, 0.7).multiply(0.42)
+            .add(sar_delta.unitScale(0.5, 2.5).multiply(0.33))
+            .add(slope.unitScale(5, 35).multiply(0.25))
+            .rename('RISK_SCORE')
+            .updateMask(raw_fire_mask)   # use the less-restrictive burn mask
+        )
+
+        # --- EXPORT STACK PARA LA IA ---
         export_stack = ee.Image.cat([
             dnbr.float().rename('dNBR'),
             sar_delta.float().rename('SAR_DELTA'),
             slope.float().rename('SLOPE')
         ]).unmask(0)
-        
+
         return {
-            "risk_layer": risk_index.updateMask(integrated_mask).updateMask(risk_index.gte(min_display_threshold)),
-            "dnbr_layer": dnbr.updateMask(legacy_fire_mask), 
-            "sar_layer": sar_delta.gt(0.8).updateMask(integrated_mask),
-            "raw_risk": risk_index.updateMask(integrated_mask),
+            # Burn scar: raw mask (no connectedPixelCount — was working before)
+            "dnbr_layer": dnbr.updateMask(raw_fire_mask),
+            # Risk: full score masked only by burn scar presence
+            "raw_risk": risk_index,
+            # SAR delta: independent of fire mask so it always renders
+            "sar_delta": sar_delta,
+            # Full stack for AI inference
             "export_stack": export_stack,
             "analysis_buffer": analysis_buffer,
-            "is_urban": is_urban,
-            "integrated_mask": integrated_mask,
-            "geom": point, "success": True
+            "geom": point,
+            "success": True
         }
-    except Exception as e: return {"error": str(e), "success": False}
+    except Exception as e:
+        return {"error": str(e), "success": False}
 
 # ---------------------------------------------------------
 # 4. MAIN APPLICATION
 # ---------------------------------------------------------
 def main():
     text_color = apply_professional_theme()
+
     with st.sidebar:
         st.markdown("### 📡 SYSTEM CONFIGURATION")
-        if aegis_brain: st.success("🤖 AI BRAIN LOADED")
+        if aegis_brain:
+            st.success("🤖 AI BRAIN LOADED")
         selected_mission = st.selectbox("MISSION PROFILE", list(SCENARIOS.keys()))
         mission_params = SCENARIOS[selected_mission]
         st.markdown("---")
@@ -188,19 +207,23 @@ def main():
         buffer_km = st.slider("Analysis Radius (km)", 2, 50, 3)
         st.markdown("---")
         with st.expander("⏳ TIME WINDOWS"):
-            d_pre = st.date_input("Pre-Fire", mission_params["dates"]['pre'])
-            d_post = st.date_input("Post-Fire", mission_params["dates"]['post'])
-            d_storm = st.date_input("Storm", mission_params["dates"]['event'])
+            d_pre   = st.date_input("Pre-Fire",  mission_params["dates"]['pre'])
+            d_post  = st.date_input("Post-Fire", mission_params["dates"]['post'])
+            d_storm = st.date_input("Storm",     mission_params["dates"]['event'])
         st.markdown("---")
         min_risk_threshold = st.slider("Risk Filter", 0.0, 0.8, 0.35)
         view_mode = st.selectbox("Map Type", ["Satellite (Realism)", "Dark (Technical)", "Light (Day Ops)"])
-        visible_layers = st.multiselect("Active Layers", ['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)'], default=['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)'])
+        visible_layers = st.multiselect(
+            "Active Layers",
+            ['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)'],
+            default=['Risk Model (WLC)', 'Soil Moisture (Radar)', 'Burn Scar (Orange)']
+        )
 
     st.title("AEGIS-1 // RISK INTELLIGENCE PLATFORM")
     st.markdown("##### POST-WILDFIRE GEOMORPHOLOGICAL SURVEILLANCE")
-    
+
     col_map, col_data = st.columns([3, 1])
-    
+
     # --- FORMATEO ESTRICTO DE FECHAS ---
     def format_date_for_gee(d):
         if isinstance(d, tuple) and len(d) == 2: return (str(d[0]), str(d[1]))
@@ -208,17 +231,20 @@ def main():
         else: return (str(d), str(d))
 
     dates_fmt = {
-        'pre': format_date_for_gee(d_pre),
-        'post': format_date_for_gee(d_post),
+        'pre':   format_date_for_gee(d_pre),
+        'post':  format_date_for_gee(d_post),
         'storm': format_date_for_gee(d_storm)
     }
-    
+
+    # Cache key does NOT include min_risk_threshold — threshold is applied at render time
     current_params = {'lat': lat, 'lon': lon, 'dates': str(dates_fmt), 'buffer': buffer_km}
-    
+
     if st.session_state.mission_data is None or st.session_state.last_calc_params != current_params:
         with st.status("🛰️ UPDATING MISSION DATA..."):
             data = generate_risk_analysis(
-                lat, lon, dates_fmt['pre'], dates_fmt['post'], dates_fmt['storm'], min_risk_threshold, buffer_km
+                lat, lon,
+                dates_fmt['pre'], dates_fmt['post'], dates_fmt['storm'],
+                buffer_km
             )
             st.session_state.mission_data = data
             st.session_state.last_calc_params = current_params
@@ -227,28 +253,60 @@ def main():
 
     with col_map:
         if data.get("success"):
-            if "Satellite" in view_mode: 
-                m = folium.Map([lat, lon], zoom_start=12, tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri')
-            elif "Light" in view_mode: 
+            if "Satellite" in view_mode:
+                m = folium.Map(
+                    [lat, lon], zoom_start=12,
+                    tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                    attr='Esri'
+                )
+            elif "Light" in view_mode:
                 m = folium.Map([lat, lon], zoom_start=12, tiles="OpenStreetMap")
-            else: 
+            else:
                 m = folium.Map([lat, lon], zoom_start=12, tiles="CartoDB dark_matter")
 
             def add_lyr(img, name, p):
-                try: 
-                    folium.raster_layers.TileLayer(tiles=ee.Image(img).getMapId(p)['tile_fetcher'].url_format, attr='GEE', name=name, overlay=True).add_to(m)
-                except: pass
+                try:
+                    folium.raster_layers.TileLayer(
+                        tiles=ee.Image(img).getMapId(p)['tile_fetcher'].url_format,
+                        attr='GEE', name=name, overlay=True
+                    ).add_to(m)
+                except Exception as e:
+                    st.warning(f"Layer '{name}' error: {str(e)[:80]}")
 
-            if 'Burn Scar (Orange)' in visible_layers: add_lyr(data['dnbr_layer'], 'Burn Scar', {'min':0.1, 'max':0.7, 'palette':['FF4500', '8B0000']})
-            if 'Risk Model (WLC)' in visible_layers: add_lyr(data['risk_layer'], 'Risk Model', {'min': 0.35, 'max': 0.8, 'palette': ['FFFF00', 'FF0000', 'FF00FF']})
-            if 'Soil Moisture (Radar)' in visible_layers: add_lyr(data['sar_layer'], 'Moisture', {'palette':['00FFFF']})
-            
+            # --- BURN SCAR: uses raw_fire_mask (no connectedPixelCount) — was already working ---
+            if 'Burn Scar (Orange)' in visible_layers:
+                add_lyr(
+                    data['dnbr_layer'], 'Burn Scar',
+                    {'min': 0.1, 'max': 0.7, 'palette': ['FF4500', '8B0000']}
+                )
+
+            # --- RISK MODEL: apply threshold at render time, independent of integrated_mask ---
+            if 'Risk Model (WLC)' in visible_layers:
+                risk_viz = data['raw_risk'].updateMask(data['raw_risk'].gte(min_risk_threshold))
+                add_lyr(
+                    risk_viz, 'Risk Model',
+                    {'min': min_risk_threshold, 'max': 0.8, 'palette': ['FFFF00', 'FF0000', 'FF00FF']}
+                )
+
+            # --- SOIL MOISTURE: use SAR_DELTA directly, no dependency on legacy_fire_mask ---
+            if 'Soil Moisture (Radar)' in visible_layers:
+                sar_viz = data['sar_delta'].gt(0.8)
+                add_lyr(
+                    sar_viz, 'Moisture',
+                    {'palette': ['00FFFF']}
+                )
+
             folium.LayerControl().add_to(m)
             st.components.v1.html(m._repr_html_(), height=850)
+
+        else:
+            st.error(f"Analysis error: {data.get('error', 'Unknown')}")
 
     with col_data:
         if data.get("success"):
             st.markdown("### MISSION TELEMETRY")
+
+            # --- AI INFERENCE ---
             if aegis_brain:
                 with st.spinner("🤖 AI INFERENCE..."):
                     try:
@@ -256,17 +314,16 @@ def main():
                         samples = data['export_stack'].sample(
                             region=roi, scale=200, numPixels=300, geometries=False
                         ).getInfo()
-                        
+
                         if 'features' in samples and len(samples['features']) > 0:
                             feat_list = [[
-                                f['properties'].get('dNBR', 0), 
-                                f['properties'].get('SAR_DELTA', 0), 
+                                f['properties'].get('dNBR', 0),
+                                f['properties'].get('SAR_DELTA', 0),
                                 f['properties'].get('SLOPE', 0)
                             ] for f in samples['features']]
-                            
+
                             input_df = pd.DataFrame(feat_list, columns=['BURN_SEVERITY_dNBR', 'SOIL_MOISTURE_CHANGE', 'SLOPE_DEG'])
                             ai_prob = np.mean(aegis_brain.predict_proba(input_df)[:, 1])
-                            
                             st.metric("AI PREDICTION (XGBOOST)", f"{ai_prob*100:.1f}%", delta="Neural Scan")
                         else:
                             st.warning("⚠️ IA: Zona sin datos válidos.")
@@ -274,18 +331,38 @@ def main():
                         st.error("⚠️ IA: Error en Telemetría")
                         st.caption(f"Log: {str(e)[:100]}")
 
+            # --- STATIC WLC METRIC ---
             try:
-                stats = data['raw_risk'].reduceRegion(ee.Reducer.mean(), data['geom'].buffer(1000), 250).getInfo()
+                stats = data['raw_risk'].reduceRegion(
+                    ee.Reducer.mean(), data['geom'].buffer(1000), 250
+                ).getInfo()
                 val = stats.get('RISK_SCORE', 0) if stats else 0
                 st.metric("VIEWPORT RISK (v5.5)", f"{(val if val else 0)*100:.1f}%", delta="Static WLC")
-            except: st.metric("VIEWPORT RISK (v5.5)", "N/A")
+            except:
+                st.metric("VIEWPORT RISK (v5.5)", "N/A")
 
+            # --- LEGEND ---
             st.markdown(create_categorical_legend(text_color), unsafe_allow_html=True)
+
+            # --- CSV EXPORT ---
             if st.button("GENERATE DATASET (CSV)"):
                 try:
-                    df = pd.DataFrame([[f['geometry']['coordinates'][1], f['geometry']['coordinates'][0], f['properties'].get('dNBR', 0)] for f in data['export_stack'].sample(region=data['analysis_buffer'], scale=100, numPixels=1000).getInfo()['features']], columns=['LAT','LON','dNBR'])
+                    raw = data['export_stack'].sample(
+                        region=data['analysis_buffer'], scale=100, numPixels=1000
+                    ).getInfo()
+                    df = pd.DataFrame([
+                        [
+                            f['geometry']['coordinates'][1],
+                            f['geometry']['coordinates'][0],
+                            f['properties'].get('dNBR', 0),
+                            f['properties'].get('SAR_DELTA', 0),
+                            f['properties'].get('SLOPE', 0)
+                        ]
+                        for f in raw['features']
+                    ], columns=['LAT', 'LON', 'dNBR', 'SAR_DELTA', 'SLOPE'])
                     st.download_button("DOWNLOAD CSV", df.to_csv(index=False), "aegis_extract.csv", "text/csv")
-                except: st.error("Export Error")
+                except Exception as e:
+                    st.error(f"Export Error: {str(e)[:100]}")
 
 if __name__ == "__main__":
     main()
