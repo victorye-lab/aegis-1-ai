@@ -194,11 +194,34 @@ def main():
     
     col_map, col_data = st.columns([3, 1])
     
-    current_params = {'lat': lat, 'lon': lon, 'dates': str(d_pre)+str(d_post)+str(d_storm), 'buffer': buffer_km}
+    # --- FORMATEO ESTRICTO DE FECHAS (v6.4.7) ---
+    def format_date_for_gee(d):
+        if isinstance(d, tuple) and len(d) == 2:
+            return (str(d[0]), str(d[1]))
+        elif isinstance(d, tuple) and len(d) == 1:
+            return (str(d[0]), str(d[0]))
+        else:
+            return (str(d), str(d))
+
+    dates_fmt = {
+        'pre': format_date_for_gee(d_pre),
+        'post': format_date_for_gee(d_post),
+        'storm': format_date_for_gee(d_storm)
+    }
+    
+    current_params = {'lat': lat, 'lon': lon, 'dates': str(dates_fmt), 'buffer': buffer_km}
     
     if st.session_state.mission_data is None or st.session_state.last_calc_params != current_params:
         with st.status("🛰️ UPDATING MISSION DATA..."):
-            data = generate_risk_analysis(lat, lon, (d_pre, d_pre), (d_post, d_post), (d_storm, d_storm), min_risk_threshold, buffer_km)
+            # Usamos dates_fmt en lugar de pasar d_pre crudo
+            data = generate_risk_analysis(
+                lat, lon, 
+                dates_fmt['pre'], 
+                dates_fmt['post'], 
+                dates_fmt['storm'], 
+                min_risk_threshold, 
+                buffer_km
+            )
             st.session_state.mission_data = data
             st.session_state.last_calc_params = current_params
 
