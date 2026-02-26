@@ -231,13 +231,20 @@ def main():
                 with st.spinner("🤖 AI INFERENCE..."):
                     try:
                         stack_to_sample = data['export_stack'].unmask(0)
-                        samples = stack_to_sample.sample(region=data['analysis_buffer'], scale=100, numPixels=500).getInfo()
+                        # Reducimos la escala a 200m para mayor estabilidad en la nube
+                        samples = stack_to_sample.sample(region=data['analysis_buffer'], scale=200, numPixels=300).getInfo()
+                        
                         if 'features' in samples and len(samples['features']) > 0:
                             feat_list = [[f['properties'].get('dNBR', 0), f['properties'].get('SAR_DELTA', 0), f['properties'].get('SLOPE', 0)] for f in samples['features']]
                             input_df = pd.DataFrame(feat_list, columns=['BURN_SEVERITY_dNBR', 'SOIL_MOISTURE_CHANGE', 'SLOPE_DEG'])
+                            # Predicción de probabilidad
                             ai_prob = np.mean(aegis_brain.predict_proba(input_df)[:, 1])
                             st.metric("AI PREDICTION (XGBOOST)", f"{ai_prob*100:.1f}%", delta="Neural Scan")
-                    except: st.error("⚠️ IA: Error")
+                        else:
+                            st.warning("⚠️ IA: Zona sin datos (Nubes/S1)")
+                    except Exception as e:
+                        st.error(f"⚠️ IA: Error de Conexión GEE")
+                        st.caption(f"Error: {str(e)[:50]}...")
 
             try:
                 stats = data['raw_risk'].reduceRegion(ee.Reducer.mean(), data['geom'].buffer(1000), 250).getInfo()
@@ -254,4 +261,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
