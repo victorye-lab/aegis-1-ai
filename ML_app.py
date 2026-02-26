@@ -146,12 +146,13 @@ def generate_risk_analysis(lat, lon, date_pre, date_post, date_storm, min_displa
         integrated_mask = legacy_fire_mask.Or(sar_delta.gt(2.5).And(is_urban.Or(is_agri)).And(legacy_fire_mask.focal_max(500)))
         risk_index = dnbr.unitScale(0.15, 0.7).multiply(0.42).add(sar_delta.unitScale(0.5, 2.5).multiply(0.33)).add(slope.unitScale(5, 35).multiply(0.25)).rename('RISK_SCORE')
         
+       # --- EXPORT STACK v6.4.4 (OPTIMIZADO PARA SERIALIZACIÓN) ---
+        # Usamos .float() para reducir el peso del objeto y asegurar compatibilidad
         export_stack = ee.Image.cat([
-            dnbr.unmask(0).rename('dNBR'),
-            sar_delta.unmask(0).rename('SAR_DELTA'),
-            slope.unmask(0).rename('SLOPE')
-        ])
-
+            dnbr.float().rename('dNBR'),
+            sar_delta.float().rename('SAR_DELTA'),
+            slope.float().rename('SLOPE')
+        ]).unmask(0) # Crucial: elimina valores null que rompen el encoder
         return {
             "risk_layer": risk_index.updateMask(integrated_mask).updateMask(risk_index.gte(min_display_threshold)),
             "dnbr_layer": dnbr.updateMask(legacy_fire_mask), 
@@ -230,21 +231,37 @@ def main():
             if aegis_brain:
                 with st.spinner("🤖 AI INFERENCE..."):
                     try:
-                        stack_to_sample = data['export_stack'].unmask(0)
-                        # Reducimos la escala a 200m para mayor estabilidad en la nube
-                        samples = stack_to_sample.sample(region=data['analysis_buffer'], scale=200, numPixels=300).getInfo()
+                        # Usamos .bounds() para enviar un rectángulo simple, no el círculo complejo
+                        roi = data['analysis_buffer'].bounds()
+                        
+                        # Muestreo optimizado
+                        samples = data['export_stack'].sample(
+                            region=roi, 
+                            scale=200, 
+                            numPixels=300,
+                            geometries=False # Esto reduce el peso del JSON masivamente
+                        ).getInfo()
                         
                         if 'features' in samples and len(samples['features']) > 0:
-                            feat_list = [[f['properties'].get('dNBR', 0), f['properties'].get('SAR_DELTA', 0), f['properties'].get('SLOPE', 0)] for f in samples['features']]
+                            # Extracción de propiedades
+                            feat_list = [[
+                                f['properties'].get('dNBR', 0), 
+                                f['properties'].get('SAR_DELTA', 0), 
+                                f['properties'].get('SLOPE', 0)
+                            ] for f in samples['features']]
+                            
                             input_df = pd.DataFrame(feat_list, columns=['BURN_SEVERITY_dNBR', 'SOIL_MOISTURE_CHANGE', 'SLOPE_DEG'])
-                            # Predicción de probabilidad
+                            
+                            # Ejecución del cerebro XGBoost
                             ai_prob = np.mean(aegis_brain.predict_proba(input_df)[:, 1])
+                            
                             st.metric("AI PREDICTION (XGBOOST)", f"{ai_prob*100:.1f}%", delta="Neural Scan")
                         else:
-                            st.warning("⚠️ IA: Zona sin datos (Nubes/S1)")
+                            st.warning("⚠️ IA: Zona sin datos válidos.")
                     except Exception as e:
-                        st.error(f"⚠️ IA: Error de Conexión GEE")
-                        st.caption(f"Error: {str(e)[:50]}...")
+                        st.error("⚠️ IA: Error de Serialización")
+                        # Imprimimos el error simplificado para no ensuciar la UI
+                        st.caption(f"Log: {str(e)[:100]}")
 
             try:
                 stats = data['raw_risk'].reduceRegion(ee.Reducer.mean(), data['geom'].buffer(1000), 250).getInfo()
@@ -261,5 +278,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
